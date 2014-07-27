@@ -1,0 +1,178 @@
+##############################################################################
+#
+# Bashlog - a simple logging library for use in bash scripts.
+#
+# Copyright 2014 Kevin L Hochhalter <klhochhalter@gmail.com>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License as published
+# by the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+##############################################################################
+
+#################
+# begin bashlog #
+#################
+
+trap '7>&-' EXIT
+
+# Set BL_LOG_TAG to the default if LOG_TAG has not been specified.
+declare -r BL_LOG_TAG=${LOG_TAG:=`basename $0`}
+
+# Set  BL_DATETIME_FORMAT to the default if DATETIME_FORMAT
+# has not been specified.
+declare -r BL_DATETIME_FORMAT=${DATETIME_FORMAT:="+%FT%T%:z"}
+
+# default BL_LEVEL to INFO if LOG_LEVEL is not set.
+declare -u BL_LEVEL=${LOG_LEVEL:='INFO'}
+
+if [ -z "$LOG_FILE" ] && [ -z "$SYSLOG_FACILITY" ]; then
+    echo "You must specify a LOG_FILE path or SYSLOG_FACILITY name." >&2
+    echo "Logging to STDERR by default." >&2
+    LOG_FILE='STDERR'
+fi
+
+if [ -n "$LOG_FILE" ] && [ -n "$SYSLOG_FACILITY" ]; then
+    echo "You must specify a LOG_FILE path or SYSLOG_FACILITY name, but not both." >&2
+    echo "Logging to STDERR by default." >&2
+    LOG_FILE='STDERR'
+fi
+
+if [ -n "$LOG_FILE" ]; then 
+
+    # Set SYSLOG_FACILITY to an empty string, since we don't
+    # log both to syslog and a file.
+    SYSLOG_FACILITY=""
+
+    if [ "$LOG_FILE" != "STDERR" ]; then
+        c0=`touch "$LOG_FILE" 2>&1`
+        if [ $? -ne 0 ]; then
+            echo "Could not create $LOG_FILE." >&2
+            echo "Logging to STDERR by default." >&2
+            LOG_FILE="STDERR"
+        fi
+    fi
+
+    if [ "$LOG_FILE" = "STDERR" ]; then
+        exec 7>&2
+    else
+        declare -r BL_LOG_FILE=$LOG_FILE
+        exec 7>> $BL_LOG_FILE
+    fi
+
+fi
+
+if [ -n "$SYSLOG_FACILITY" ]; then
+    if [[ "$SYSLOG_FACILITY" != local[0-7] ]]; then
+        echo "Only facilities local0 through local7 are supported for syslog." >&2
+        echo "Logging to local0 by default." >&2
+        SYSLOG_FACILITY='local0'
+    fi
+    declare -lr BL_SYSLOG_FACILITY=$SYSLOG_FACILITY
+fi
+
+# Log (severity) levels are taken from python and RFC 5424.
+declare -A bl_log_level
+declare -A bl_syslog_severity
+
+# These are the python numeric log levels, with the addition
+# of RFC 5424 levels. The RFC 5424 levels have been given
+# numbers to sequence them with the python levels.
+bl_log_level[DEBUG]=10
+bl_log_level[INFO]=20
+bl_log_level[NOTICE]=25 # RFC 5424 specific
+bl_log_level[WARN]=30
+bl_log_level[WARNING]=30
+bl_log_level[ERR]=40
+bl_log_level[ERROR]=40
+bl_log_level[CRIT]=50
+bl_log_level[CRITICAL]=50
+bl_log_level[ALERT]=60 # RFC 5424 specific
+bl_log_level[EMERG]=70 # RFC 5424 specific
+bl_log_level[EMERGENCY]=70 # RFC 5424 specific
+declare -r bl_log_level
+
+if [ -z "${bl_log_level[$BL_LEVEL]}" ]; then
+    echo "\"$BL_LEVEL\" is not a valid LOG_LEVEL at line ${BASH_LINENO[0]}. Defaulting to \"INFO\"." >&2
+    BL_LEVEL="INFO"
+fi
+
+declare -r BL_LEVEL
+
+# These are the RFC 5424 numeric severity levels.
+bl_syslog_severity[DEBUG]=7
+bl_syslog_severity[INFO]=6
+bl_syslog_severity[NOTICE]=5
+bl_syslog_severity[WARN]=4
+bl_syslog_severity[WARNING]=4
+bl_syslog_severity[ERR]=3
+bl_syslog_severity[ERROR]=3
+bl_syslog_severity[CRIT]=2
+bl_syslog_severity[CRITICAL]=2
+bl_syslog_severity[ALERT]=1
+bl_syslog_severity[EMERG]=0
+bl_syslog_severity[EMERGENCY]=0
+declare -r bl_syslog_severity
+
+_bashlog ()
+{
+
+    local BL_DATE
+    local BL_MESSAGE
+    local BL_MESSAGE_LEVEL
+    local BL_RESET_IFS
+    local BL_LOG_LINE
+    local BL_NUM_LOG_LEVEL
+    local IFS # Must be local to the function.
+
+    BL_NUM_LOG_LEVEL=${bl_log_level[$BL_LEVEL]}
+
+    declare -u BL_MESSAGE_LEVEL=$1
+
+    if [ -z "${bl_log_level[$BL_MESSAGE_LEVEL]}" ]; then
+        echo "\"${BL_MESSAGE_LEVEL}\" is not a valid MESSAGE_LOG_LEVEL at line ${BASH_LINENO[0]}. Defaulting to \"INFO\"." >&2
+        BL_MESSAGE_LEVEL="INFO"
+    fi
+
+    BL_MESSAGE=$2
+
+    IFS=$'\n'
+
+    BL_DATE=`date "${BL_DATETIME_FORMAT}"`
+
+    if [ ${bl_log_level[$BL_MESSAGE_LEVEL]} -ge $BL_NUM_LOG_LEVEL ]; then
+        if [ -n "$BL_SYSLOG_FACILITY" ]; then
+            for BL_LOG_LINE in $BL_MESSAGE; do
+                logger -i \
+                    -t "$BL_LOG_TAG" \
+                    -p "${BL_SYSLOG_FACILITY}.${bl_syslog_severity[$BL_MESSAGE_LEVEL]}" \
+                    "$BL_MESSAGE_LEVEL: $BL_LOG_LINE"
+            done
+        else
+            for BL_LOG_LINE in $BL_MESSAGE; do
+                printf -v BL_MESSAGE_LINE "%s %s[%s] %s: %s" \
+                    "$BL_DATE" \
+                    "$BL_LOG_TAG" \
+                    "$$" \
+                    "$BL_MESSAGE_LEVEL" \
+                    "$BL_LOG_LINE"
+                echo "$BL_MESSAGE_LINE" >&7
+            done
+        fi
+    fi
+
+}
+
+###############
+# end bashlog #
+###############
+
